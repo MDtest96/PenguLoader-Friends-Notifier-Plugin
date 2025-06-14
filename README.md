@@ -33,7 +33,7 @@ A comprehensive Pengu Loader plugin that integrates directly into the League of 
 This plugin requires [Pengu Loader](https://pengu.lol/) to be installed.
 
 1.  **Download the plugin file:**
-    * Go to the [Releases page](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME/releases) of this repository.
+    * Go to the [Releases page](https://github.com/MDtest96/PenguLoader-Friends-Notifier-Plugin/releases) of this repository.
     * Download the `friends-notifier-main.js` file from the latest release.
 
 2.  **Place the plugin file:**
