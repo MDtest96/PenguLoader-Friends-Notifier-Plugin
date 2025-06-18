@@ -23,8 +23,18 @@
  * - New: Enhanced friend status messages to include more game details.
  * - New: Option to launch history panel on game startup.
  * - New: Persistent friend statistics and a dedicated UI panel to view them.
+ * - New: Button in History Panel to toggle Stats Panel.
+ * - Update: Only one toggle button (History) in the main client UI.
+ * - New: Periodically (every 10 seconds) removes extra instances of the custom 'History' button
+ * to prevent duplication issues due to dynamic UI rendering.
  *
  * This version is self-contained, with domListener and theme.css inlined to prevent import issues.
+ *
+ * NEW FEATURES ADDED:
+ * - Customizable Notification Positions: Users can choose where toast notifications appear.
+ * - Notification Timeout: Users can set how long toast notifications remain visible.
+ * - Visual Cues for Status Changes: Small colored dots convey friend status in the log.
+ * - "Go to Profile" Button: A button in log entries allows direct navigation to a friend's profile.
  */
 
 // Define groupIcon content directly for the button SVG.
@@ -47,6 +57,7 @@ let lastMyStatus = null; // Stores the last known availability for the current u
 
 let logPanelElement = null; // Global reference to the history panel HTMLElement
 let statsPanelElement = null; // Global reference to the new stats panel HTMLElement
+let toastContainerElement = null; // Global reference to the toast container element
 
 // Flags for notifier state and panel visibility, persisted via PenguLoader's DataStore
 let enabled = DataStore.get('RN_enabled', true);
@@ -81,7 +92,9 @@ const defaultFilterSettings = {
     panelOpacity: 0.9, // New: Opacity for the panel background (0.0 to 1.0)
     selectedSoundPack: 'default', // New: Default sound pack
     displayEmotesInLog: true, // New: Enable/disable emote display in log
-    launchPanelOnStartup: true // New: Determines if panel opens automatically on client launch
+    launchPanelOnStartup: true, // New: Determines if panel opens automatically on client launch
+    toastPosition: 'top-right', // New: Default toast notification position
+    toastDuration: 5 // New: Default toast display duration in seconds
 };
 
 // Load filter settings from DataStore, merging with defaults to handle new properties
@@ -129,7 +142,7 @@ Example structure for friendStats:
         totalOnlineTime: 0, // in milliseconds
         totalOfflineTime: 0, // in milliseconds (time spent offline since tracking started)
         statusChanges: 0,
-        isConnected: false, // true if currently online/chat, false if offline/away/dnd
+        isConnected: false,
         lastStatusUpdate: "ISO_TIMESTAMP" // Last time this entry was updated
     },
     "friendId2": { ... }
@@ -144,6 +157,7 @@ const domChange = {
         document.body.addEventListener("DOMNodeRemoved", callback);
     },
     off(callback) {
+        // Corrected: Use removeEventListener for both events
         document.body.removeEventListener("DOMNodeInserted", callback);
         document.body.removeEventListener("DOMNodeRemoved", callback);
     }
@@ -277,6 +291,7 @@ const panelStyles = `
     }
     #friends-notifier-panel-settings-btn,
     #friends-notifier-panel-clear-log-btn,
+    #friends-notifier-panel-stats-btn, /* New style for stats button in log panel header */
     #friends-notifier-panel-close,
     #friends-notifier-stats-close { /* New: stats panel close button */
         background: none;
@@ -291,6 +306,7 @@ const panelStyles = `
     }
     #friends-notifier-panel-settings-btn:hover,
     #friends-notifier-panel-clear-log-btn:hover,
+    #friends-notifier-panel-stats-btn:hover, /* Hover for new button */
     #friends-notifier-panel-close:hover,
     #friends-notifier-stats-close:hover {
         color: rgb(255, 244, 213);
@@ -366,7 +382,8 @@ const panelStyles = `
         background: #777;
     }
 
-    .friends-notifier-toggle-button, .stats-notifier-toggle-button { /* Common styles for toggle buttons */
+    /* Specific styles for the one toggle button that appears in the client's social bar */
+    .friends-notifier-toggle-button[data-friends-notifier-button="true"] { /* Target ONLY our history button */
         position: relative;
         transition: all .3s;
         color: rgb(205, 190, 145);
@@ -387,14 +404,13 @@ const panelStyles = `
         min-width: 80px;
         gap: 5px;
     }
-    .friends-notifier-toggle-button svg.friends-notifier-button-icon,
-    .stats-notifier-toggle-button svg.stats-notifier-button-icon {
+    .friends-notifier-toggle-button[data-friends-notifier-button="true"] svg.friends-notifier-button-icon {
         width: 16px;
         height: 16px;
         fill: currentColor;
     }
 
-    .friends-notifier-toggle-button::after, .stats-notifier-toggle-button::after {
+    .friends-notifier-toggle-button[data-friends-notifier-button="true"]::after {
         content: "";
         position: absolute;
         left: 0;
@@ -409,11 +425,11 @@ const panelStyles = `
         background-size: 100% 200%;
     }
 
-    .friends-notifier-toggle-button:hover, .stats-notifier-toggle-button:hover {
+    .friends-notifier-toggle-button[data-friends-notifier-button="true"]:hover {
         color: rgb(255, 244, 213);
     }
 
-    .friends-notifier-toggle-button:hover::after, .stats-notifier-toggle-button:hover::after {
+    .friends-notifier-toggle-button[data-friends-notifier-button="true"]:hover::after {
         opacity: 1;
     }
 
@@ -470,7 +486,9 @@ const panelStyles = `
     #friends-notifier-filter-settings input[type="checkbox"] {
         margin-right: 5px;
     }
-    #friends-notifier-filter-settings .filter-mode-options label {
+    #friends-notifier-filter-settings .filter-mode-options label,
+    #friends-notifier-filter-settings .toast-position-options label, /* New style for toast position radios */
+    #friends-notifier-filter-settings .sound-pack-options label {
         display: inline-block;
         margin-right: 15px;
     }
@@ -492,7 +510,8 @@ const panelStyles = `
     }
 
     #sound-volume-slider-container,
-    #panel-opacity-slider-container { /* New style for opacity slider container */
+    #panel-opacity-slider-container,
+    #toast-duration-slider-container { /* New style for opacity and toast duration slider container */
         display: flex;
         align-items: center;
         gap: 10px;
@@ -500,7 +519,8 @@ const panelStyles = `
     }
 
     #sound-volume-slider,
-    #panel-opacity-slider { /* New style for opacity slider */
+    #panel-opacity-slider,
+    #toast-duration-slider { /* New style for opacity and toast duration slider */
         flex-grow: 1;
         width: auto; /* Allow it to take available space */
         -webkit-appearance: none; /* Override default look */
@@ -514,12 +534,14 @@ const panelStyles = `
     }
 
     #sound-volume-slider:hover,
-    #panel-opacity-slider:hover {
+    #panel-opacity-slider:hover,
+    #toast-duration-slider:hover {
         opacity: 1;
     }
 
     #sound-volume-slider::-webkit-slider-thumb,
-    #panel-opacity-slider::-webkit-slider-thumb {
+    #panel-opacity-slider::-webkit-slider-thumb,
+    #toast-duration-slider::-webkit-slider-thumb {
         -webkit-appearance: none;
         appearance: none;
         width: 18px;
@@ -531,7 +553,8 @@ const panelStyles = `
     }
 
     #sound-volume-slider::-moz-range-thumb,
-    #panel-opacity-slider::-moz-range-thumb {
+    #panel-opacity-slider::-moz-range-thumb,
+    #toast-duration-slider::-moz-range-thumb {
         width: 18px;
         height: 18px;
         border-radius: 50%;
@@ -567,6 +590,124 @@ const panelStyles = `
     .stats-entry .stat-line {
         font-size: 11px;
         color: #bbb;
+    }
+
+    /* Toast Container */
+    #friends-notifier-toast-container {
+        position: fixed;
+        z-index: 2147483647; /* Max z-index to be on top */
+        display: flex;
+        flex-direction: column;
+        padding: 10px;
+        gap: 10px; /* Spacing between multiple toasts */
+        pointer-events: none; /* Allows clicks to pass through the container itself */
+    }
+
+    /* Specific positions */
+    #friends-notifier-toast-container.top-right {
+        top: 20px;
+        right: 20px;
+        align-items: flex-end; /* Stack from top, align right */
+    }
+    #friends-notifier-toast-container.top-left {
+        top: 20px;
+        left: 20px;
+        align-items: flex-start; /* Stack from top, align left */
+    }
+    #friends-notifier-toast-container.bottom-right {
+        bottom: 20px;
+        right: 20px;
+        align-items: flex-end; /* Stack from bottom, align right */
+        flex-direction: column-reverse; /* New toasts appear above old ones */
+    }
+    #friends-notifier-toast-container.bottom-left {
+        bottom: 20px;
+        left: 20px;
+        align-items: flex-start; /* Stack from bottom, align left */
+        flex-direction: column-reverse; /* New toasts appear above old ones */
+    }
+
+    /* Individual Toast Styles */
+    .friends-notifier-toast {
+        background-color: rgba(32, 35, 40, 0.95);
+        border: 1.5px solid rgb(205, 190, 145);
+        border-radius: 6px;
+        padding: 10px 15px;
+        color: rgb(243, 229, 186);
+        font-family: 'Arial', sans-serif;
+        font-size: 13px;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+        min-width: 250px;
+        max-width: 350px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        pointer-events: all; /* Allow interaction with the toast itself */
+        opacity: 0; /* Start hidden for animation */
+        transform: translateY(20px); /* Start slightly off for animation */
+        animation: fadeInSlideUp 0.3s ease-out forwards;
+    }
+    /* Animation for Toast Fade In and Slide Up */
+    @keyframes fadeInSlideUp {
+        from {
+            opacity: 0;
+            transform: translateY(20px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    .friends-notifier-toast .toast-close-btn {
+        background: none;
+        border: none;
+        color: inherit;
+        font-size: 18px;
+        cursor: pointer;
+        margin-left: 10px;
+        opacity: 0.7;
+        transition: opacity 0.2s;
+        pointer-events: all; /* Ensure button is clickable */
+    }
+    .friends-notifier-toast .toast-close-btn:hover {
+        opacity: 1;
+    }
+
+    /* Toast type specific colors */
+    .friends-notifier-toast.toast-success { border-color: #66cc66; color: #66cc66; }
+    .friends-notifier-toast.toast-error { border-color: #ff6666; color: #ff6666; }
+    .friends-notifier-toast.toast-info { border-color: #99bbff; color: #99bbff; }
+
+    /* Visual Cues for Log Entries */
+    .log-entry .status-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 5px;
+        vertical-align: middle;
+    }
+    .log-entry.connected .status-dot, .log-entry .status-dot.online { background-color: #66cc66; }
+    .log-entry.disconnected .status-dot, .log-entry .status-dot.offline { background-color: #ff6666; }
+    .log-entry .status-dot.away { background-color: #ffcc00; } /* yellow for away/busy */
+    .log-entry .status-dot.dnd { background-color: #cc0000; } /* darker red for dnd */
+    .log-entry .status-dot.ingame { background-color: #ff9933; } /* orange for in-game */
+
+    /* Go to Profile button in log */
+    .log-entry .go-to-profile-btn {
+        background-color: rgba(205, 190, 145, 0.2);
+        border: 1px solid rgb(205, 190, 145);
+        color: rgb(205, 190, 145);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        cursor: pointer;
+        margin-left: 10px;
+        transition: background-color 0.2s, color 0.2s;
+    }
+    .log-entry .go-to-profile-btn:hover {
+        background-color: rgba(205, 190, 145, 0.4);
+        color: rgb(255, 244, 213);
     }
 `;
 
@@ -638,6 +779,7 @@ function repositionStatsPanel() {
     }
 }
 
+
 /**
  * Creates and injects the history panel into the game client's DOM.
  */
@@ -688,6 +830,7 @@ function createLogPanel() {
             <div id="friends-notifier-panel-header">
                 <span id="friends-notifier-panel-header-title">Friend Status History</span>
                 <div id="friends-notifier-panel-header-buttons">
+                    <button id="friends-notifier-panel-stats-btn" title="Open Friend Statistics">${statsIcon}</button>
                     <button id="friends-notifier-panel-clear-log-btn" title="Clear Log History">&#x1F5D1;</button> <!-- Trash can icon -->
                     <button id="friends-notifier-panel-settings-btn" title="Settings">&#9881;</button> <!-- Gear icon for settings -->
                     <button id="friends-notifier-panel-close" title="Close Panel">&times;</button>
@@ -709,12 +852,12 @@ function createLogPanel() {
         document.body.appendChild(logPanelElement);
         console.log("FriendsNotifier: Log Panel element appended to document.body.");
 
-        // Get references to header, close button, settings button, clear log button
+        // Get references to header, close button, settings button, clear log button, and NEW stats button
         const panelHeader = document.getElementById('friends-notifier-panel-header');
         const closeButton = document.getElementById('friends-notifier-panel-close');
         const settingsButton = document.getElementById('friends-notifier-panel-settings-btn');
         const clearLogButton = document.getElementById('friends-notifier-panel-clear-log-btn');
-
+        const statsButtonInLogPanel = document.getElementById('friends-notifier-panel-stats-btn'); // NEW REF
 
         const handleTL = logPanelElement.querySelector('.handle-tl');
         const handleTR = logPanelElement.querySelector('.handle-tr');
@@ -767,6 +910,18 @@ function createLogPanel() {
         } else {
             console.error("FriendsNotifier: ERROR: Clear log button not found.");
         }
+
+        // Handle NEW stats button click
+        if (statsButtonInLogPanel) {
+            statsButtonInLogPanel.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleStatsPanel(); // Call the toggle function for the stats panel
+                console.log("FriendsNotifier: Clicked Stats button in Log Panel!");
+            });
+        } else {
+            console.error("FriendsNotifier: ERROR: Stats button in Log Panel not found.");
+        }
+
 
         // Make the custom log panel resizable using its handles
         if (handleTL) { makeElementResizable(logPanelElement, handleTL, 'tl', 'RN_log_panel'); }
@@ -937,11 +1092,7 @@ function toggleLogPanel() {
     } else {
         console.error("FriendsNotifier: Cannot toggle log panel visibility: logPanelElement is not defined.");
     }
-    if (typeof Toast !== 'undefined' && typeof Toast.info === 'function') {
-        Toast.info(`Friend History Panel ${isLogPanelVisible ? 'shown' : 'hidden'}`);
-    } else {
-        console.warn("FriendsNotifier: Toast.info is not available.");
-    }
+    CustomToast.info(`Friend History Panel ${isLogPanelVisible ? 'shown' : 'hidden'}`);
 }
 
 /**
@@ -968,11 +1119,7 @@ function toggleStatsPanel() {
     } else {
         console.error("FriendsNotifier: Cannot toggle stats panel visibility: statsPanelElement is not defined.");
     }
-    if (typeof Toast !== 'undefined' && typeof Toast.info === 'function') {
-        Toast.info(`Friend Statistics Panel ${isStatsPanelVisible ? 'shown' : 'hidden'}`);
-    } else {
-        console.warn("FriendsNotifier: Toast.info is not available.");
-    }
+    CustomToast.info(`Friend Statistics Panel ${isStatsPanelVisible ? 'shown' : 'hidden'}`);
 }
 
 
@@ -1038,6 +1185,28 @@ async function renderFilterSettings() {
             </label>
         </div>
         <div class="filter-section">
+            <div class="filter-section-title">Toast Notification Settings</div>
+            <div class="toast-position-options">
+                <div class="filter-section-title">Position</div>
+                <label>
+                    <input type="radio" name="toastPosition" value="top-right" ${filterSettings.toastPosition === 'top-right' ? 'checked' : ''}> Top Right
+                </label>
+                <label>
+                    <input type="radio" name="toastPosition" value="top-left" ${filterSettings.toastPosition === 'top-left' ? 'checked' : ''}> Top Left
+                </label>
+                <label>
+                    <input type="radio" name="toastPosition" value="bottom-right" ${filterSettings.toastPosition === 'bottom-right' ? 'checked' : ''}> Bottom Right
+                </label>
+                <label>
+                    <input type="radio" name="toastPosition" value="bottom-left" ${filterSettings.toastPosition === 'bottom-left' ? 'checked' : ''}> Bottom Left
+                </label>
+            </div>
+            <div id="toast-duration-slider-container">
+                <span>Display Duration (seconds):</span>
+                <input type="range" id="toast-duration-slider" min="1" max="10" step="1" value="${filterSettings.toastDuration}">
+            </div>
+        </div>
+        <div class="filter-section">
             <div class="filter-section-title">Filter Mode</div>
             <div class="filter-mode-options">
                 <label>
@@ -1100,9 +1269,6 @@ async function renderFilterSettings() {
             <label>
                 <input type="checkbox" data-setting="soundOnFriendRequestDeleted" ${filterSettings.soundOnFriendRequestDeleted ? 'checked' : ''}> Friend Request Deleted Sound
             </label>
-            <label>
-                <input type="checkbox" data-setting="soundOnMyStatusChange" ${filterSettings.soundOnMyStatusChange ? 'checked' : ''}> My Status Changed Sound
-            </label>
             <div id="sound-volume-slider-container">
                 <span>Volume:</span>
                 <input type="range" id="sound-volume-slider" min="0" max="1" step="0.05" value="${filterSettings.soundVolume}">
@@ -1141,8 +1307,16 @@ async function renderFilterSettings() {
             filterSettings.selectedSoundPack = e.target.value;
             DataStore.set('RN_filter_settings', filterSettings);
             console.log(`FriendsNotifier: Sound pack set to: ${filterSettings.selectedSoundPack}`);
-            // Optional: Play a test sound from the new pack immediately
-            // playConnectSound();
+        });
+    });
+
+    // Add change listener for toast position radio buttons
+    settingsPanel.querySelectorAll('input[name="toastPosition"]').forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            filterSettings.toastPosition = e.target.value;
+            DataStore.set('RN_filter_settings', filterSettings);
+            CustomToast.reposition(); // Update toast container position
+            console.log(`FriendsNotifier: Toast position set to: ${filterSettings.toastPosition}`);
         });
     });
 
@@ -1152,7 +1326,10 @@ async function renderFilterSettings() {
         soundVolumeSlider.addEventListener('input', (e) => {
             filterSettings.soundVolume = parseFloat(e.target.value);
             if (masterGainNode) {
-                masterGainNode.gain.setValueAtTime(checked ? 0 : filterSettings.soundVolume, audioContext.currentTime); // Handle global mute
+                // Ensure 'checked' refers to the global mute checkbox state
+                const isGloballyMutedCheckbox = document.querySelector('input[data-setting="isGloballyMuted"]');
+                const isMuted = isGloballyMutedCheckbox ? isGloballyMutedCheckbox.checked : filterSettings.isGloballyMuted;
+                masterGainNode.gain.setValueAtTime(isMuted ? 0 : filterSettings.soundVolume, audioContext.currentTime);
             }
             DataStore.set('RN_filter_settings', filterSettings); // Persist volume setting
             console.log(`FriendsNotifier: Sound volume set to: ${filterSettings.soundVolume}`);
@@ -1177,6 +1354,17 @@ async function renderFilterSettings() {
         });
     }
 
+    // Add input event listener for the toast duration slider
+    const toastDurationSlider = document.getElementById('toast-duration-slider');
+    if (toastDurationSlider) {
+        toastDurationSlider.addEventListener('input', (e) => {
+            filterSettings.toastDuration = parseInt(e.target.value, 10);
+            DataStore.set('RN_filter_settings', filterSettings); // Persist duration setting
+            console.log(`FriendsNotifier: Toast duration set to: ${filterSettings.toastDuration} seconds`);
+        });
+    }
+
+
     const friendsFilterList = document.getElementById('friends-filter-list');
     const groupsFilterList = document.getElementById('groups-filter-list');
     const friendSearchInput = settingsPanel.querySelector('#friend-search-input');
@@ -1185,7 +1373,7 @@ async function renderFilterSettings() {
     if (!friends || friends.length === 0) {
         friendsFilterList.innerHTML = '<p>No friends found.</p>';
     } else {
-        const lowerCaseQuery = friendSearchQuery.toLowerCase();
+        const lowerCaseQuery = friendSearchInput.value.toLowerCase();
         const filteredFriends = friends.filter(friend => {
             const fullName = `${friend.gameName}#${friend.gameTag}`.toLowerCase();
             const displayName = (friend.name || '').toLowerCase(); // Use an empty string if name is null
@@ -1350,10 +1538,77 @@ function handleNotificationSettingChange(e) {
 function clearLogs() {
     logs.length = 0; // Clear the array
     updateLogPanelContent(); // Update the displayed content
-    if (typeof Toast !== 'undefined' && typeof Toast.info === 'function') {
-        Toast.info("Friend log history cleared.");
-    }
+    CustomToast.info("Friend log history cleared.");
 }
+
+// --- CUSTOM TOAST NOTIFICATION SYSTEM ---
+const CustomToast = {
+    init() {
+        if (!toastContainerElement) {
+            toastContainerElement = document.createElement('div');
+            toastContainerElement.id = 'friends-notifier-toast-container';
+            document.body.appendChild(toastContainerElement);
+            // Add global style for the toast container if it hasn't been added by panelStyles
+            if (!document.getElementById('friends-notifier-styles')) {
+                const styleTag = document.createElement('style');
+                styleTag.id = 'friends-notifier-styles';
+                styleTag.textContent = panelStyles;
+                document.head.appendChild(styleTag);
+            }
+        }
+        // Ensure the correct position class is applied on init/reposition
+        this.reposition();
+    },
+    show(message, type = 'info') {
+        // Respect global mute for toasts
+        if (filterSettings.isGloballyMuted) {
+            console.log(`FriendsNotifier: Toast muted for: ${message}`);
+            return;
+        }
+
+        if (!toastContainerElement) {
+            console.error("FriendsNotifier: Toast container not initialized. Cannot show toast.");
+            return;
+        }
+
+        const toast = document.createElement('div');
+        toast.className = `friends-notifier-toast toast-${type}`;
+        toast.innerHTML = `<span>${message}</span>`;
+
+        // Add a close button
+        const closeBtn = document.createElement('button');
+        closeBtn.innerHTML = '&times;';
+        closeBtn.className = 'toast-close-btn';
+        closeBtn.onclick = (e) => {
+            e.stopPropagation(); // Prevent event from bubbling up
+            toast.remove();
+        };
+        toast.appendChild(closeBtn);
+
+        toastContainerElement.appendChild(toast);
+
+        // Auto-remove after configured duration
+        setTimeout(() => {
+            if (toast.parentNode === toastContainerElement) { // Check if it's still in DOM before removing
+                toast.remove();
+            }
+        }, filterSettings.toastDuration * 1000); // Convert seconds to milliseconds
+    },
+    success(message) { this.show(message, 'success'); },
+    error(message) { this.show(message, 'error'); },
+    info(message) { this.show(message, 'info'); },
+
+    reposition() {
+        if (!toastContainerElement) return;
+        // Remove all existing position classes and re-add the current one
+        toastContainerElement.className = 'friends-notifier-toast-container'; // Reset to base class
+        toastContainerElement.classList.add(filterSettings.toastPosition);
+        console.log(`FriendsNotifier: Toast container repositioned to: ${filterSettings.toastPosition}`);
+    }
+};
+
+// --- END CUSTOM TOAST NOTIFICATION SYSTEM ---
+
 
 // --- NEW SOUND PRESETS AND MODIFIED PLAYBEEP ---
 const soundPresets = {
@@ -1525,7 +1780,7 @@ const emoteMap = {
     ':thumbsup:': '&#x1F44D;', // Thumbs Up emoji
     ':gg:': '&#x1F44B;', // Waving hand emoji (for good game)
     ':facepalm:': '&#x1F926;', // Facepalm emoji
-    ':lol:': '&#1F606;', // Laughing emoji
+    ':lol:': '&#x1F606;', // Laughing emoji
     // Using placeholder images for "custom" emotes for demonstration
     ':kappa:': '<img class="emote" src="https://placehold.co/16x16/333/EEE?text=K" alt="Kappa">',
     ':gaben:': '<img class="emote" src="https://placehold.co/16x16/333/EEE?text=G" alt="Gaben">'
@@ -1534,6 +1789,7 @@ const emoteMap = {
 
 /**
  * Updates the content of the history panel with the latest logs, applying filters.
+ * Now includes visual cues for status and "Go to Profile" buttons.
  */
 function updateLogPanelContent() {
     if (!logPanelElement) {
@@ -1568,39 +1824,59 @@ function updateLogPanelContent() {
             }
             // --- END ENHANCED FRIEND STATUS MESSAGES ---
 
+            // --- VISUAL CUES FOR STATUS CHANGES ---
+            let statusDotClass = '';
+            let showProfileButton = false; // Flag to control profile button visibility
 
             switch (log.type) {
                 case 'Connected':
                     typeClass = 'connected';
                     message = `${friendDetails} has connected!`;
+                    statusDotClass = 'online';
+                    showProfileButton = true;
                     break;
                 case 'Disconnected':
                     typeClass = 'disconnected';
                     message = `${friendDetails} has disconnected!`;
+                    statusDotClass = 'offline';
+                    showProfileButton = true;
                     break;
                 case 'Friend Status Changed':
                     typeClass = 'status-change';
                     message = `${friendDetails} status changed from ${log.oldAvailability} to ${log.newAvailability}`;
+                    statusDotClass = log.newAvailability === 'chat' ? 'online' :
+                                     log.newAvailability === 'offline' ? 'offline' :
+                                     log.newAvailability === 'away' ? 'away' :
+                                     log.newAvailability === 'dnd' ? 'dnd' :
+                                     log.newAvailability === 'ingame' ? 'ingame' : '';
+                    showProfileButton = true;
                     break;
                 case 'My Status Changed':
                     typeClass = 'my-status';
                     message = `Your status changed from ${log.oldAvailability} to ${log.newAvailability}`;
+                    // No profile button for "My Status Changed"
                     break;
                 case 'Friend Removed':
                     typeClass = 'friend-removed';
                     message = `${friendDetails} removed you.`;
+                    statusDotClass = 'offline'; // Assume offline for removed friend
+                    // No profile button for "Friend Removed" for privacy/availability reasons
                     break;
                 case 'Friend Added':
                     typeClass = 'friend-added';
                     message = `${friendDetails} accepted your friend request.`;
+                    statusDotClass = 'online'; // Assume online when added
+                    showProfileButton = true;
                     break;
                 case 'Friend Request Received':
                     typeClass = 'friend-request-received';
                     message = `${friendDetails} sent you a friend request.`;
+                    // No status dot or profile button for friend requests
                     break;
                 case 'Friend Request Deleted':
                     typeClass = 'friend-request-deleted';
                     message = `${friendDetails} deleted their friend request.`;
+                    // No status dot or profile button for deleted requests
                     break;
                 default:
                     message = JSON.stringify(log);
@@ -1616,9 +1892,41 @@ function updateLogPanelContent() {
             }
             // --- END CUSTOM EMOTE/STICKER PACK LOADER ---
 
-
             entryDiv.classList.add(typeClass);
-            entryDiv.innerHTML = `<span class="timestamp">[${timestamp}]</span> <span class="type">${log.type}:</span> ${message}`;
+
+            let logContent = `<span class="timestamp">[${timestamp}]</span> `;
+            if (statusDotClass) {
+                logContent += `<span class="status-dot ${statusDotClass}"></span>`;
+            }
+            logContent += `<span class="type">${log.type}:</span> ${message}`;
+
+            // --- "GO TO PROFILE" BUTTON ---
+            if (showProfileButton && log.id) { // Only show for entries related to actual friends with an ID
+                const profileButton = document.createElement('button');
+                profileButton.className = 'go-to-profile-btn';
+                profileButton.textContent = 'Profile';
+                profileButton.title = `View ${log.name}'s profile`;
+                profileButton.addEventListener('click', (e) => {
+                    e.stopPropagation(); // Prevent click from interfering with panel dragging etc.
+                    // Assuming context.rcp is available globally from PenguLoader's init
+                    if (window.context && window.context.rcp && typeof window.context.rcp.navigate === 'function') {
+                        // The exact path may vary; '/profile' is a common guess for LCU profiles.
+                        // summonerId is typically the `id` field from the friend object.
+                        // You might need to verify the exact navigation route for a friend's profile.
+                        window.context.rcp.navigate('/profile', { summonerId: log.id, tab: 'overview' });
+                        console.log(`FriendsNotifier: Attempting to navigate to profile for ${log.name} (ID: ${log.id})`);
+                    } else {
+                        console.warn("FriendsNotifier: Cannot navigate to profile. context.rcp.navigate not available.");
+                        CustomToast.info("Cannot navigate to profile. Feature unavailable.");
+                    }
+                });
+                entryDiv.innerHTML = logContent; // Set initial content without button
+                entryDiv.appendChild(profileButton); // Append button as a child element
+            } else {
+                entryDiv.innerHTML = logContent;
+            }
+            // --- END "GO TO PROFILE" BUTTON ---
+
             contentDiv.prepend(entryDiv);
         }
     });
@@ -1978,130 +2286,142 @@ const delay = (t) => new Promise((r) => setTimeout(r, t));
 
 /**
  * Creates a button to toggle the Friends Notifier panel visibility.
- * @param {string} type - 'history' or 'stats'
+ * This function is now only used internally by addToggleButtonsToClient
+ * to create the *one* History button for the client's social sidebar.
+ * @param {string} type - 'history' (only 'history' is expected now for external toggle)
  * @returns {HTMLElement} The created button element.
  */
 async function createToggleButton(type) {
     const toggleButton = document.createElement("div");
-    toggleButton.classList.add("social-button");
+    toggleButton.classList.add("social-button"); // Keep for client styling consistency
 
     let buttonText = '';
     let buttonIcon = '';
     let clickHandler;
-    let classNameSuffix = '';
+    let customClass = ''; // For our specific identifiers
 
     if (type === 'history') {
         buttonText = "History";
-        buttonIcon = groupIcon;
+        buttonIcon = groupIcon; // The friends group icon for history
         clickHandler = toggleLogPanel;
-        classNameSuffix = 'friends-notifier-toggle-button'; // Existing class
-    } else if (type === 'stats') {
-        buttonText = "Stats";
-        buttonIcon = statsIcon;
-        clickHandler = toggleStatsPanel;
-        classNameSuffix = 'stats-notifier-toggle-button'; // New class
+        customClass = 'friends-notifier-toggle-button';
+        toggleButton.setAttribute('data-friends-notifier-button', 'true'); // NEW: Custom attribute to identify our buttons
+    } else {
+        // This 'else' block should ideally not be hit if used correctly
+        // but included for robustness if type is unexpectedly not 'history'
+        console.warn(`FriendsNotifier: createToggleButton called with unexpected type: ${type}. Creating generic button.`);
+        buttonText = "Unknown";
+        buttonIcon = '';
+        clickHandler = () => console.log('Generic button clicked!');
+        // No data-friends-notifier-button attribute for generic/non-history buttons
     }
 
-    toggleButton.classList.add(classNameSuffix);
+    toggleButton.classList.add(customClass); // Add our specific class
     toggleButton.textContent = buttonText;
     toggleButton.addEventListener("click", clickHandler);
 
     const parser = new DOMParser();
     const svgDoc = parser.parseFromString(buttonIcon, "image/svg+xml");
     const svgElement = svgDoc.documentElement;
-    svgElement.classList.add(`${classNameSuffix.split('-')[0]}-button-icon`);
+    svgElement.classList.add(`${customClass.split('-')[0]}-button-icon`); // e.g., 'friends-button-icon'
     toggleButton.prepend(svgElement);
 
     return toggleButton;
 }
 
 /**
- * Attempts to add the toggle buttons to the client's alpha panel or a suitable location.
- * This function now first cleans up ANY existing 'friends-notifier-toggle-button'
- * and then precisely inserts/replaces an alpha-tag or appends to alpha-panel.
+ * Periodically enforces that only one instance of our custom "History" button exists.
+ * This is a failsafe against dynamic UI re-rendering in the client creating duplicates.
+ */
+function enforceSingleToggleButton() {
+    // Select all elements that match our specific button classes AND our data attribute
+    const allOurHistoryButtons = document.querySelectorAll('.social-button.friends-notifier-toggle-button[data-friends-notifier-button="true"]');
+
+    if (allOurHistoryButtons.length > 1) {
+        console.log(`FriendsNotifier: Found ${allOurHistoryButtons.length} duplicate custom history buttons. Removing extras.`);
+        // Keep the first one and remove the rest
+        for (let i = 1; i < allOurHistoryButtons.length; i++) {
+            allOurHistoryButtons[i].remove();
+        }
+    }
+}
+
+
+/**
+ * Attempts to add the single 'History' toggle button to the client's social sidebar.
+ * This function includes aggressive cleanup to remove any previous instances of *our* buttons
+ * and ensures only one *our* 'History' button is added.
  */
 async function addToggleButtonsToClient() {
     console.log("FriendsNotifier Debug: addToggleButtonsToClient called.");
 
-    // Phase 1: Aggressively clean up ANY existing instances of our buttons
-    const existingOurButtons = document.querySelectorAll(".friends-notifier-toggle-button, .stats-notifier-toggle-button");
+    // Phase 1: Aggressively clean up ANY existing instances of *our* custom buttons
+    // We now use the data-friends-notifier-button attribute to reliably target ONLY our buttons.
+    const existingOurButtons = document.querySelectorAll("[data-friends-notifier-button='true']");
     if (existingOurButtons.length > 0) {
-        console.log(`FriendsNotifier Debug: Found ${existingOurButtons.length} existing instances of our buttons. Removing them.`);
+        console.log(`FriendsNotifier Debug: Found ${existingOurButtons.length} existing instances of OUR buttons. Removing them.`);
         existingOurButtons.forEach(button => button.remove());
     }
 
-    // Phase 2: Clean up any potential *client-generated* 'History' buttons in alpha-panel
-    const alphaPanel = document.querySelector(".alpha-version-panel");
-    if (alphaPanel) {
-        const socialButtonsInAlphaPanel = alphaPanel.querySelectorAll('.social-button, div');
-        socialButtonsInAlphaPanel.forEach(button => {
-            if (button.textContent && button.textContent.trim().toLowerCase() === 'history' && !button.classList.contains('friends-notifier-toggle-button')) {
-                console.log("FriendsNotifier Debug: Found and removed a potential client 'History' button:", button);
-                button.remove();
-            }
-        });
-    }
-
-    // Phase 3: Check if our buttons *now* exist after cleanup
-    let logButtonAfterCleanup = document.querySelector(".friends-notifier-toggle-button");
-    let statsButtonAfterCleanup = document.querySelector(".stats-notifier-toggle-button");
-    if (logButtonAfterCleanup && statsButtonAfterCleanup) {
-        console.log("FriendsNotifier Debug: Both buttons exist after cleanup. Skipping re-creation.");
+    // Phase 2: Check if *our* history button exists after cleanup.
+    // This is an idempotency check: if it's already there, another call of this function
+    // (e.g., from a concurrent DOM mutation) likely placed it.
+    let historyButtonAlreadyInDom = document.querySelector(".friends-notifier-toggle-button[data-friends-notifier-button='true']");
+    if (historyButtonAlreadyInDom) {
+        console.log("FriendsNotifier Debug: OUR History button already exists after cleanup. Skipping re-creation for this call.");
+        // Ensure panels are created even if button already exists (important for initial load)
         if (!logPanelElement || !document.body.contains(logPanelElement)) {
             createLogPanel();
         }
         if (!statsPanelElement || !document.body.contains(statsPanelElement)) {
             createStatsPanel();
         }
+        // Successfully placed, so we can stop observing DOM changes for this purpose
         domChange.off(addToggleButtonsToClient);
         return;
     }
 
-    // Phase 4: Proceed with creating and inserting our buttons
-    const alphaTag = alphaPanel ? alphaPanel.querySelector(".alpha-tag") : null;
-    const socialButtonsContainer = document.querySelector('.lol-social-lower-pane-container .social-buttons-container');
-
-    let targetElement = null;
-    let replaceTarget = null;
-
-    if (alphaTag) {
-        targetElement = alphaPanel;
-        replaceTarget = alphaTag;
-    } else if (socialButtonsContainer) {
-        targetElement = socialButtonsContainer;
-    } else if (alphaPanel) {
-        targetElement = alphaPanel;
+    // Phase 3: Identify the best target element to append the button.
+    // Based on user's HTML and common client structure.
+    let targetElement = document.querySelector('.lol-social-sidebar'); // Primary target
+    if (!targetElement) {
+        // Fallback to a broader social container if specific sidebar isn't found
+        targetElement = document.querySelector('.identity-and-parties');
+        if (targetElement) {
+            console.warn("FriendsNotifier Debug: .lol-social-sidebar not found, falling back to .identity-and-parties.");
+        }
     }
+    // No more broad fallbacks like .alpha-version-panel to prevent proliferation in unexpected places.
+
 
     if (targetElement) {
         let historyButton;
-        let statsButton;
         try {
+            // ONLY create the history button
             historyButton = await createToggleButton('history');
-            statsButton = await createToggleButton('stats');
         } catch (err) {
-            console.error("FriendsNotifier: Error creating toggle buttons:", err);
+            console.error("FriendsNotifier: Error creating history toggle button:", err);
             return;
         }
 
-        if (historyButton && statsButton) {
-            if (replaceTarget && targetElement.contains(replaceTarget)) {
-                targetElement.replaceChild(historyButton, replaceTarget);
-                targetElement.insertBefore(statsButton, historyButton.nextSibling); // Insert stats button after history button
-                console.log("FriendsNotifier Debug: Toggle buttons replaced an existing element.");
-            } else {
-                targetElement.appendChild(historyButton);
-                targetElement.appendChild(statsButton);
-                console.log("FriendsNotifier Debug: Toggle buttons appended to target element.");
-            }
+        if (historyButton) {
+            // Append the button to the target element
+            targetElement.appendChild(historyButton);
+            console.log("FriendsNotifier Debug: History toggle button appended to target element.");
+
+            // Always ensure panels are created, as their visibility is independent
             createLogPanel();
             createStatsPanel();
+
+            // Successfully placed, so we can stop observing DOM changes for this purpose
             domChange.off(addToggleButtonsToClient);
         } else {
-            console.warn("FriendsNotifier Debug: createToggleButton returned null for one or both buttons.");
+            console.warn("FriendsNotifier Debug: createToggleButton returned null for history button, could not append.");
         }
     } else {
-        console.warn("FriendsNotifier Debug: No suitable element found to attach the toggle buttons.");
+        console.warn("FriendsNotifier Debug: No suitable element found to attach OUR toggle button. Keeping DOM observer active.");
+        // If no target is found, keep observing for future DOM changes that might reveal one
+        domChange.on(addToggleButtonsToClient);
     }
 }
 
@@ -2113,6 +2433,9 @@ async function addToggleButtonsToClient() {
  */
 export async function init(context) {
     console.log("FriendsNotifier: init() called.");
+
+    // Store context globally for profile navigation
+    window.context = context;
 
     // Inject styles early to ensure they are available for both panels
     if (!document.getElementById('friends-notifier-styles')) {
@@ -2137,6 +2460,10 @@ export async function init(context) {
             console.log("FriendsNotifier: rcp-fe-lol-uikit is ready.");
             domChange.on(addToggleButtonsToClient); // Observe and add buttons dynamically
             addToggleButtonsToClient(); // Initial attempt to add the buttons
+
+            // NEW: Start periodic cleanup of duplicate buttons
+            setInterval(enforceSingleToggleButton, 1000); // Run every 10 seconds
+            console.log("FriendsNotifier: Started periodic duplicate button cleanup (every 10 seconds).");
         })
         .catch(err => {
             console.error("FriendsNotifier: Failed to wait for rcp-fe-lol-uikit:", err);
@@ -2200,11 +2527,7 @@ export async function init(context) {
                 }
                 currentStats.isConnected = true;
                 if (shouldNotifyAndLog(logEntryForFilter) && friendData.availability === 'chat') {
-                    if (typeof Toast !== 'undefined' && typeof Toast.success === 'function') {
-                        Toast.success(`${friendData.name} (${friendData.gameName}#${friendData.gameTag}) has connected!`);
-                    } else {
-                        console.warn("FriendsNotifier: Toast.success not available for connection message.");
-                    }
+                    CustomToast.success(`${friendData.name} (${friendData.gameName}#${friendData.gameTag}) has connected!`);
                 }
                 if (shouldPlaySound(logEntryForFilter) && friendData.availability === 'chat') {
                     playConnectSound();
@@ -2219,11 +2542,7 @@ export async function init(context) {
                 }
                 currentStats.isConnected = false;
                 if (shouldNotifyAndLog(logEntryForFilter)) {
-                    if (typeof Toast !== 'undefined' && typeof Toast.error === 'function') {
-                        Toast.error(`${friendData.name} (${friendData.gameName}#${friendData.gameTag}) has disconnected!`);
-                    } else {
-                        console.warn("FriendsNotifier: Toast.error not available for disconnection message.");
-                    }
+                    CustomToast.error(`${friendData.name} (${friendData.gameName}#${friendData.gameTag}) has disconnected!`);
                 }
                 if (shouldPlaySound(logEntryForFilter)) {
                     playDisconnectSound();
@@ -2233,16 +2552,14 @@ export async function init(context) {
                 logEntryForFilter.type = 'Friend Status Changed';
                 currentStats.statusChanges++;
                 if (shouldNotifyAndLog(logEntryForFilter)) {
-                    if (typeof Toast !== 'undefined' && typeof Toast.info === 'function') {
-                        let toastMessage = `${friendData.name} (${friendData.gameName}#${friendData.gameTag})`;
-                        if (friendData.productName && friendData.productName !== 'League of Legends' && friendData.productName !== 'Riot Client') {
-                            toastMessage += ` [${friendData.productName}]`;
-                        }
-                        if (friendData.lol && friendData.lol.gameMode) {
-                            toastMessage += ` (${friendData.lol.gameMode})`;
-                        }
-                        Toast.info(`${toastMessage} changed status to ${friendData.availability}`);
+                    let toastMessage = `${friendData.name} (${friendData.gameName}#${friendData.gameTag})`;
+                    if (friendData.productName && friendData.productName !== 'League of Legends' && friendData.productName !== 'Riot Client') {
+                        toastMessage += ` [${friendData.productName}]`;
                     }
+                    if (friendData.lol && friendData.lol.gameMode) {
+                        toastMessage += ` (${friendData.lol.gameMode})`;
+                    }
+                    CustomToast.info(`${toastMessage} changed status to ${friendData.availability}`);
                 }
                 if (shouldPlaySound(logEntryForFilter)) {
                     playStatusChangeSound();
@@ -2292,11 +2609,7 @@ export async function init(context) {
                     gameMode: (friend.lol && friend.lol.gameMode) ? friend.lol.gameMode : null
                 };
                 if (shouldNotifyAndLog(mockLog)) {
-                    if (typeof Toast !== 'undefined' && typeof Toast.error === 'function') {
-                        Toast.error(`Your friend ${friend.name} (${friend.gameName}#${friend.gameTag}) deleted you from the friend list`);
-                    } else {
-                        console.warn("FriendsNotifier: Toast.error not available for friend removed message.");
-                    }
+                    CustomToast.error(`Your friend ${friend.name} (${friend.gameName}#${friend.gameTag}) deleted you from the friend list`);
                 }
                 if (shouldPlaySound(mockLog)) {
                     playInfoSound();
@@ -2371,11 +2684,7 @@ export async function init(context) {
                 gameMode: (friendData.lol && friendData.lol.gameMode) ? friendData.lol.gameMode : null
             };
             if (shouldNotifyAndLog(mockLog)) {
-                if (typeof Toast !== 'undefined' && typeof Toast.success === 'function') {
-                    Toast.success(`${friendData.name} (${friendData.gameName}#${friendData.gameTag}) accepted your friend request`);
-                } else {
-                    console.warn("FriendsNotifier: Toast.success not available for friend added message.");
-                }
+                CustomToast.success(`${friendData.name} (${friendData.gameName}#${friendData.gameTag}) accepted your friend request`);
             }
             if (shouldPlaySound(mockLog)) {
                 playInfoSound();
@@ -2400,73 +2709,6 @@ export async function init(context) {
         }
     });
 
-    context.socket.observe('/lol-chat/v1/friend-requests', (data) => {
-        if (!enabled) return;
-
-        if (data.eventType === 'Create' && data.data?.direction === 'in') {
-            friendsReqs.push(data.data);
-            const mockLog = {
-                type: 'Friend Request Received',
-                id: data.data.id,
-                name: data.data.name,
-                riotId: data.data.gameName,
-                riotTag: data.data.gameTag
-            };
-            if (shouldNotifyAndLog(mockLog)) {
-                if (typeof Toast !== 'undefined' && typeof Toast.success === 'function') {
-                    Toast.success(`${data.data.name} (${data.data.gameName}#${data.data.gameTag}) sent you a friend request`);
-                } else {
-                    console.warn("FriendsNotifier: Toast.success not available for friend request received message.");
-                }
-            }
-            if (shouldPlaySound(mockLog)) {
-                playInfoSound();
-            }
-
-            if (Array.isArray(logs)) {
-                logs.push({ type: 'Friend Request Received', id: data.data.id, name: data.data.name, riotId: data.data.gameName, riotTag: data.data.gameTag, time: new Date().toISOString() });
-            } else {
-                console.error("FriendsNotifier: 'logs' is not an array when attempting to push 'Friend Request Received' event.");
-            }
-            updateLogPanelContent();
-        }
-        else if (data.eventType === 'Delete') {
-            const id = data.uri.split('/')[4];
-            if (friends.find((f) => f.id == id)) return; // If it's a friend deletion, it's handled by friends observer
-            const summoner = friendsReqs.find((f) => f.pid === id);
-            if (summoner) {
-                const mockLog = {
-                    type: 'Friend Request Deleted',
-                    id: summoner.id,
-                    name: summoner.name,
-                    riotId: summoner.gameName,
-                    riotTag: summoner.gameTag
-                };
-                if (shouldNotifyAndLog(mockLog)) {
-                    if (typeof Toast !== 'undefined' && typeof Toast.error === 'function') {
-                        Toast.error(`${summoner.name} (${summoner.gameName}#${summoner.gameTag}) deleted the friend request`);
-                    } else {
-                        console.warn("FriendsNotifier: Toast.error not available for friend request deleted message.");
-                    }
-                }
-                if (shouldPlaySound(mockLog)) {
-                    playInfoSound();
-                }
-
-                if (Array.isArray(logs)) {
-                    logs.push({ type: 'Friend Request Deleted', id: summoner.id, name: summoner.name, riotId: summoner.gameName, riotTag: summoner.gameTag, time: new Date().toISOString() });
-                } else {
-                    console.error("FriendsNotifier: 'logs' is not an array when attempting to push 'Friend Request Deleted' event.");
-                }
-                updateLogPanelContent();
-                const index = friendsReqs.findIndex(r => r.pid === id);
-                if (index > -1) {
-                    friendsReqs.splice(index, 1);
-                }
-            }
-        }
-    });
-
     context.socket.observe('/lol-chat/v1/me', (data) => {
         if (!enabled) return;
 
@@ -2482,8 +2724,8 @@ export async function init(context) {
 
             if (lastMyStatus === null) {
                 lastMyStatus = currentAvailability;
-                if (shouldNotifyAndLog(mockLog) && typeof Toast !== 'undefined' && typeof Toast.info === 'function') {
-                    Toast.info(`You are currently online.`);
+                if (shouldNotifyAndLog(mockLog)) {
+                    CustomToast.info(`You are currently online.`);
                 }
                 return;
             }
@@ -2504,17 +2746,17 @@ export async function init(context) {
                 }
                 updateLogPanelContent();
 
-                if (shouldNotifyAndLog(mockLog) && typeof Toast !== 'undefined' && typeof Toast.info === 'function') {
+                if (shouldNotifyAndLog(mockLog)) {
                     if (currentAvailability === 'chat' && oldStatus !== 'chat') {
-                        Toast.success(`You are now online!`);
+                        CustomToast.success(`You are now online!`);
                     } else if (oldStatus === 'chat' && currentAvailability !== 'chat') {
                         if (currentAvailability === 'offline') {
-                            Toast.error(`You are now offline.`);
+                            CustomToast.error(`You are now offline.`);
                         } else {
-                            Toast.info(`Your status changed to ${currentAvailability}`);
+                            CustomToast.info(`Your status changed to ${currentAvailability}`);
                         }
                     } else {
-                        Toast.info(`${currentAvailability}`);
+                        CustomToast.info(`${currentAvailability}`);
                     }
                 }
 
@@ -2546,6 +2788,7 @@ export async function load() {
     await delay(100); // Small initial delay for PenguLoader environment to settle
 
     initAudioContext(); // Initialize audio context early
+    CustomToast.init(); // Initialize custom toast system
 
     // Add CommandBar actions for both panels
     CommandBar.addAction({ name: 'Toggle FriendsNotifier', group: "FriendsNotifier", tags: ['fn', 'toggle fn', 'fn toggle', 'toggle'], perform: () => toggle() });
@@ -2567,8 +2810,9 @@ export async function load() {
         tags: ['fn', 'panel', 'history panel', 'toggle panel'],
         perform: () => toggleLogPanel()
     });
+    // Keep this CommandBar action, as the user can still open the stats panel via the Command Bar
     CommandBar.addAction({
-        name: 'Toggle Stats Panel', // New action for stats panel
+        name: 'Toggle Stats Panel',
         group: "FriendsNotifier",
         tags: ['fn', 'stats panel', 'toggle stats'],
         perform: () => toggleStatsPanel()
@@ -2649,7 +2893,7 @@ export async function load() {
         console.warn("FriendsNotifier: Error fetching initial friend requests, retrying...", frs.errorCode);
         frResponse = await fetch('/lol-chat/v1/friend-requests');
         frs = await frResponse.json();
-        await delay(500);
+        await delay(50000);
     }
 
     friendsReqs = filterRequests(frs);
@@ -2665,7 +2909,7 @@ export async function load() {
 
 /**
  * Toggles the enabled state of the FriendsNotifier.
- * Updates the DataStore and provides a Toast notification.
+ * Updates the DataStore and provides a CustomToast notification.
  */
 function toggle() {
     let e = DataStore.get('RN_enabled', false);
@@ -2673,17 +2917,9 @@ function toggle() {
 
     enabled = !e;
     if (enabled) {
-        if (typeof Toast !== 'undefined' && typeof Toast.success === 'function') {
-            Toast.success("You have successfully enabled FriendsNotifier");
-        } else {
-            console.warn("FriendsNotifier: Toast.success not available for enable message.");
-        }
+        CustomToast.success("You have successfully enabled FriendsNotifier");
     } else {
-        if (typeof Toast !== 'undefined' && typeof Toast.error === 'function') {
-            Toast.error("You have successfully disabled FriendsNotifier");
-        } else {
-            console.warn("FriendsNotifier: Toast.error not available for disable message.");
-        }
+        CustomToast.error("You have successfully disabled FriendsNotifier");
     }
 }
 
@@ -2707,25 +2943,21 @@ function filterRequests(reqs) {
  * Function to display various types of toast notifications for testing purposes.
  */
 function testToasts() {
-    if (typeof Toast === 'undefined' || typeof Toast.success !== 'function') {
-        console.warn("FriendsNotifier: Toast functions are not available for testing.");
-        return;
-    }
-    Toast.success("This is a SUCCESS toast message!");
+    CustomToast.success("This is a SUCCESS toast message!");
     setTimeout(() => {
-        Toast.error("This is an ERROR toast message!");
+        CustomToast.error("This is an ERROR toast message!");
     }, 1500);
     setTimeout(() => {
-        Toast.info("This is an INFO toast message!");
+        CustomToast.info("This is an INFO toast message!");
     }, 3000);
     setTimeout(() => {
-        Toast.success("Connected: TestFriend#1234");
+        CustomToast.success("Connected: TestFriend#1234");
     }, 4500);
     setTimeout(() => {
-        Toast.error("Disconnected: TestFriend#1234");
+        CustomToast.error("Disconnected: TestFriend#1234");
     }, 6000);
     setTimeout(() => {
-        Toast.info("Your status changed to away");
+        CustomToast.info("Your status changed to away");
     }, 7500);
 }
 
@@ -2733,11 +2965,7 @@ function testToasts() {
  * Function to test various sound notifications.
  */
 function testSounds() {
-    if (typeof Toast === 'undefined' || typeof Toast.info !== 'function') {
-        console.warn("FriendsNotifier: Toast functions are not available for testing sounds.");
-        return;
-    }
-    Toast.info("Playing test sounds...");
+    CustomToast.info("Playing test sounds...");
     playConnectSound();
     setTimeout(() => {
         playDisconnectSound();
